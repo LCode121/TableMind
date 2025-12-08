@@ -106,19 +106,37 @@ class DataFrameAccessor(BaseDataAccessor):
         def wrapper(self, filepath, *args, **kwargs):
             cache_key = (filepath, self.__class__.__name__) + tuple(args) + tuple([f"{k}={v}" for k, v in kwargs.items()])
             # 检查缓存（第一次无锁检查）
+            import os
+            # 获取文件当前的修改时间
+            current_mtime = None
+            if os.path.exists(filepath):
+                current_mtime = os.path.getmtime(filepath)
+            
             if cache_key in cached:
-                self.logger.info(f'{cache_key} cache hit')
-                return cached[cache_key]
+                cached_mtime, cached_df = cached[cache_key]
+                # 只有文件修改时间一致时才使用缓存
+                if current_mtime is not None and cached_mtime == current_mtime:
+                    self.logger.info(f'{cache_key} cache hit (mtime unchanged)')
+                    return cached_df.copy()
+                else:
+                    self.logger.info(f'{cache_key} cache invalidated (file modified: {cached_mtime} -> {current_mtime})')
+
 
             with lock:
                 # 双重检查避免竞争条件
                 if cache_key in cached:
-                    self.logger.info(f'{cache_key} cache hit in lock')
-                    return cached[cache_key]
+                    cached_mtime, cached_df = cached[cache_key]
+                    if current_mtime is not None and cached_mtime == current_mtime:
+                        self.logger.info(f'{cache_key} cache hit in lock')
+                        return cached_df.copy()
 
-                self.logger.info(f'{cache_key} cache miss')
+                self.logger.info(f'{cache_key} cache miss, loading file...')
                 df = loader_func(self, filepath, *args, **kwargs)
-                cached[cache_key] = df
+                
+                # 存储修改时间和数据
+                if current_mtime is not None:
+                    cached[cache_key] = (current_mtime, df)
+                
                 return df.copy()
 
         return wrapper
