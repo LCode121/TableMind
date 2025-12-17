@@ -1,9 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
-
- 数据概要，主要用于保存数据探查结果，为代码生成提供上下文
-"""
-
 from dataclasses import dataclass
 from textwrap import dedent
 

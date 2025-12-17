@@ -1,7 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
-"""
-
 import os
 
 from dotenv import load_dotenv

@@ -1,7 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
-"""
-
 import os
 from textwrap import dedent
 from typing import List

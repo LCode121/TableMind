@@ -1,8 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
- 表格转换代码执行器
-"""
-
 import os
 import traceback
 from typing import Optional, List
@@ -16,7 +11,7 @@ from llms.base_llm import BaseLLM
 from schema.execution_error_history import ExecutionErrorHistoryItem
 
 
-class TableTransformExecutor:
+class TableOperationExecutor:
     def __init__(self, data_accessor: BaseDataAccessor, llm: Optional[BaseLLM] = None):
         self.llm = llm
         self.data_accessor = data_accessor
@@ -37,7 +32,7 @@ class TableTransformExecutor:
         max_retry_count = config.get_config()['max_retry_execution_count']
         self.logger.info(f"max_retry_execution_count: {max_retry_count}")
 
-        error_corrector = TableTransformErrorCorrector(self.llm)
+        error_corrector = TableOperationErrorCorrector(self.llm)
         error_history_list: List[ExecutionErrorHistoryItem] = []
         result_df = pd.DataFrame([])
 
@@ -88,7 +83,7 @@ class TableTransformExecutor:
         exec(code, namespace, namespace)
         
         df = self.data_accessor.dataframe
-        result = namespace['transform'](df, output_path)
+        result = namespace['operation'](df, output_path)
 
         if isinstance(result, pd.DataFrame):
             return result
@@ -98,7 +93,7 @@ class TableTransformExecutor:
             return result
 
 
-class TableTransformErrorCorrector:
+class TableOperationErrorCorrector:
     """表格转换代码错误纠正器"""
     
     def __init__(self, llm: BaseLLM):
@@ -111,7 +106,7 @@ class TableTransformErrorCorrector:
         prompt_path = os.path.join(
             config.proj_root, 
             'data', 'prompts', 'code_error_correction', 'python', 
-            f"table_transform_{version}.md"
+            f"table_operation_{version}.md"
         )
         with open(prompt_path, encoding='utf-8') as f:
             return f.read()

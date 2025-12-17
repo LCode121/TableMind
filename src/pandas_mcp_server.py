@@ -1,6 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
-"""
 import os
 import traceback
 from typing import List, Dict, Annotated
@@ -13,8 +10,8 @@ import config
 import utils
 from code_executor import CodeExecutor
 from code_generators.python_generator import PythonGenerator
-from code_generators.table_transform_generator import TableTransformGenerator
-from table_transform_executor import TableTransformExecutor
+from code_generators.table_operation_generator import TableOperationGenerator
+from table_operation_executor import TableOperationExecutor
 from data_accessors.csv_accessor import CSVAccessor
 from data_accessors.excel_accessor import ExcelAccessor
 from llms.chat_openai import ChatOpenAI
@@ -188,7 +185,7 @@ def generate_step_output_path(original_path: str, step: int) -> str:
     name='Table_operation',
     description='对数据表进行转换操作（如插入列、删除列、pivot、melt、筛选、排序等），并保存到新文件'
 )
-async def transform_table(
+async def operation_table(
         instruction: Annotated[str, Field(description="操作指令，描述需要对表格进行的转换操作")],
         path_or_url: Annotated[str, Field(description="数据文件所在路径或URL，仅支持Excel和CSV")],
         step: Annotated[int, Field(description="步骤编号，用于生成输出文件名，避免覆盖原文件", ge=1)],
@@ -232,8 +229,8 @@ async def transform_table(
     logger.info(f'output_path: {output_path}')
 
     # 生成转换代码
-    code_generator = TableTransformGenerator(data_accessor, llm)
-    code_executor = TableTransformExecutor(data_accessor, llm)
+    code_generator = TableOperationGenerator(data_accessor, llm)
+    code_executor = TableOperationExecutor(data_accessor, llm)
 
     try:
         code = code_generator.generate_code(instruction, output_path)

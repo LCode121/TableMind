@@ -1,6 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
-"""
 from typing import Optional
 
 import pandas as pd

@@ -1,7 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
- 表格转换代码生成器 - 用于生成pandas表操作代码
-"""
 import os
 from datetime import datetime
 
@@ -12,7 +8,7 @@ from llms.base_llm import BaseLLM
 from schema.data_summary import DataSummary
 
 
-class TableTransformGenerator:
+class TableOperationGenerator:
     def __init__(self, data_accessor: DataFrameAccessor, llm: BaseLLM):
         self.llm = llm
         self.data_accessor = data_accessor
@@ -22,7 +18,7 @@ class TableTransformGenerator:
     def _load_prompt_tmpl(self):
         version = "v1"
         prompt_path = os.path.join(
-            config.proj_root, 'data', 'prompts', 'code_gen', 'python', f"table_transform_{version}.md"
+            config.proj_root, 'data', 'prompts', 'code_gen', 'python', f"table_operation_{version}.md"
         )
         with open(prompt_path, encoding='utf-8') as f:
             prompt_tmpl = f.read()

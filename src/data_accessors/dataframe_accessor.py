@@ -1,6 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
-"""
 import threading
 from abc import abstractmethod
 from functools import wraps

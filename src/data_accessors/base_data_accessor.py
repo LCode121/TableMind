@@ -1,6 +1,3 @@
-"""
- Created by Steven Luo on 2025/8/6
-"""
 from abc import ABC, abstractmethod
 from datetime import datetime
 from textwrap import dedent

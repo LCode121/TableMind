@@ -51,7 +51,7 @@
 ```python
 import pandas as pd
 
-def transform(df: pd.DataFrame, output_path: str) -> pd.DataFrame:
+def operation(df: pd.DataFrame, output_path: str) -> pd.DataFrame:
     """
     对输入的DataFrame进行转换操作，并保存到指定路径
     
@@ -108,7 +108,7 @@ def transform(df: pd.DataFrame, output_path: str) -> pd.DataFrame:
 # 返回值要求
 
 - 请仅返回完整的Python代码，不要包含任何描述性内容
-- 代码必须包含完整的`transform`函数定义
+- 代码必须包含完整的`operation`函数定义
 - 函数必须将结果保存到指定的output_path
 - 函数必须返回转换后的DataFrame
 - 严禁使用matplotlib、seaborn等绘图库
