@@ -1,6 +1,6 @@
-import os
+import json
 import traceback
-from typing import List, Dict, Annotated
+from typing import List, Annotated
 
 from fastmcp import FastMCP, Context
 from fastmcp.tools.tool import ToolResult
@@ -23,6 +23,7 @@ ACCESS_TOKEN = config.get_config()['mcp_server_token']
 logger = utils.get_logger(__name__)
 
 llm = ChatOpenAI()
+
 
 def get_bearer_token(ctx):
     request = ctx.get_http_request()
@@ -163,34 +164,16 @@ async def analyze_data(
     )
 
 
-def generate_step_output_path(original_path: str, step: int) -> str:
-    """
-    根据原始文件路径和步骤编号生成输出文件路径
-    
-    Args:
-        original_path: 原始文件路径
-        step: 步骤编号
-        
-    Returns:
-        带步骤编号的新文件路径，例如：data.xlsx -> data_step_1.xlsx
-    """
-    dirname = os.path.dirname(original_path)
-    basename = os.path.basename(original_path)
-    name, ext = os.path.splitext(basename)
-    new_filename = f"{name}_step_{step}{ext}"
-    return os.path.join(dirname, new_filename)
-
-
 @mcp.tool(
     name='Table_operation',
-    description='对数据表进行转换操作（如插入列、删除列、pivot、melt、筛选、排序等），并保存到新文件'
+    description='对数据表进行转换操作（如插入列、删除列、pivot、melt、筛选、排序、合并等），结果保存到指定的输出路径'
 )
 async def operation_table(
-        instruction: Annotated[str, Field(description="操作指令，描述需要对表格进行的转换操作")],
-        path_or_url: Annotated[str, Field(description="数据文件所在路径或URL，仅支持Excel和CSV")],
-        step: Annotated[int, Field(description="步骤编号，用于生成输出文件名，避免覆盖原文件", ge=1)],
+        instruction: Annotated[str, Field(description="操作指令，详细描述需要对表格进行的转换操作，例如：'删除A列'、'按日期排序'、'将表1和表2按ID列合并'")],
+        input_paths: Annotated[List[str], Field(description="输入文件路径列表，包含完整路径、文件名和后缀。单表操作传1个路径，多表操作（如合并）传多个路径。仅支持Excel(.xlsx)和CSV(.csv)格式")],
+        output_path: Annotated[str, Field(description="输出文件的完整路径，包含文件名和后缀。仅支持Excel(.xlsx)和CSV(.csv)格式")],
         context: Context
-) -> Annotated[ToolResult, Field(description="表格转换结果")]:
+) -> Annotated[str, Field(description="JSON格式的结果，包含file_path(保存路径)和path_desc(操作描述)")]:
     """
     根据用户指令对数据表进行转换操作
     
@@ -200,47 +183,45 @@ async def operation_table(
     - 数据重塑：pivot、melt、透视表等
     - 分组聚合：groupby、窗口函数等
     - 数据清洗：处理缺失值、异常值、字符串处理等
+    - 多表操作：合并(merge/join)、拼接(concat)等
     
     Args:
-        instruction (str): 操作指令
-        path_or_url (str): 数据文件路径，仅支持Excel和CSV
-        step (int): 步骤编号，>=1
+        instruction (str): 操作指令，描述需要执行的转换操作
+        input_paths (List[str]): 输入文件路径列表，支持单个或多个文件
+        output_path (str): 输出文件的完整路径
 
     Returns:
-        ToolResult: 包含转换后的数据预览和保存路径
+        str: JSON格式字符串，包含file_path和path_desc
     """
     logger.info(f'instruction: {instruction}')
-    logger.info(f'path_or_url: {path_or_url}')
-    logger.info(f'step: {step}')
+    logger.info(f'input_paths: {input_paths}')
+    logger.info(f'output_path: {output_path}')
 
-    path_or_url = path_or_url.strip()
     instruction = instruction.strip()
+    output_path = output_path.strip()
+    input_paths = [p.strip() for p in input_paths]
 
-    # 获取数据访问器
-    data_accessor = get_data_accessor(path_or_url)
+    # 获取所有输入文件的数据访问器
+    data_accessors = [get_data_accessor(p) for p in input_paths]
     await context.report_progress(
         progress=0.2,
         total=1.0,
         message="完成数据加载",
     )
 
-    # 生成输出路径
-    output_path = generate_step_output_path(path_or_url, step)
-    logger.info(f'output_path: {output_path}')
-
-    # 生成转换代码
-    code_generator = TableOperationGenerator(data_accessor, llm)
-    code_executor = TableOperationExecutor(data_accessor, llm)
+    # 生成转换代码（使用第一个数据访问器作为主表）
+    code_generator = TableOperationGenerator(data_accessors, llm)
+    code_executor = TableOperationExecutor(data_accessors, llm)
 
     try:
-        code = code_generator.generate_code(instruction, output_path)
+        code = code_generator.generate_code(instruction, input_paths, output_path)
         await context.report_progress(
             progress=0.5,
             total=1.0,
             message="完成代码生成",
         )
 
-        result_df = code_executor.execute(instruction, code, output_path)
+        result_df, operation_desc = code_executor.execute(instruction, code, input_paths, output_path)
         await context.report_progress(
             progress=0.9,
             total=1.0,
@@ -251,95 +232,21 @@ async def operation_table(
         logger.error(traceback.format_exc())
         raise
 
-    # 准备返回结果
-    preview_rows = min(20, len(result_df))
-    preview_df = result_df.head(preview_rows)
-    
-    result_info = {
-        'output_path': output_path,
-        'total_rows': len(result_df),
-        'total_columns': len(result_df.columns),
-        'columns': result_df.columns.tolist(),
-        'preview': preview_df.to_dict(orient='list')
-    }
-
     await context.report_progress(
         progress=1.0,
         total=1.0,
         message="转换完成",
     )
 
-    content_text = f"""## 表格转换完成
+    # 返回JSON格式结果
+    result = {
+        "file_path": output_path,
+        "path_desc": operation_desc if operation_desc else instruction
+    }
 
-### 输出信息
-- **保存路径**: `{output_path}`
-- **总行数**: {len(result_df)}
-- **总列数**: {len(result_df.columns)}
-- **列名**: {', '.join(result_df.columns.tolist())}
+    logger.info(f'{instruction} -> {json.dumps(result, ensure_ascii=False)}')
 
-### 数据预览（前{preview_rows}行）
-{preview_df.to_markdown()}
-"""
-
-    logger.info(f'{instruction} -> saved to {output_path}')
-
-    return ToolResult(
-        content=content_text,
-        structured_content=result_info
-    )
-
-
-@mcp.tool(
-    name='get_table_steps',
-    description='获取已执行的转换步骤信息，查看某个文件的所有步骤版本'
-)
-async def get_transform_steps(
-        path_or_url: Annotated[str, Field(description="原始数据文件路径")],
-        context: Context
-) -> Annotated[str, Field(description="已存在的步骤文件列表")]:
-    """
-    查看某个文件的所有步骤版本
-    
-    Args:
-        path_or_url: 原始数据文件路径
-        
-    Returns:
-        已存在的步骤文件列表
-    """
-    path_or_url = path_or_url.strip()
-    dirname = os.path.dirname(path_or_url)
-    basename = os.path.basename(path_or_url)
-    name, ext = os.path.splitext(basename)
-
-    # 查找所有步骤文件
-    step_files = []
-    if os.path.isdir(dirname) or dirname == '':
-        search_dir = dirname if dirname else '.'
-        for filename in os.listdir(search_dir):
-            if filename.startswith(f"{name}_step_") and filename.endswith(ext):
-                filepath = os.path.join(search_dir, filename)
-                step_files.append({
-                    'filename': filename,
-                    'filepath': filepath,
-                    'size': os.path.getsize(filepath),
-                    'modified': os.path.getmtime(filepath)
-                })
-    
-    # 按步骤编号排序
-    step_files.sort(key=lambda x: x['filename'])
-
-    if not step_files:
-        return f"未找到 `{basename}` 的任何步骤版本文件"
-
-    result = f"## {basename} 的步骤版本文件\n\n"
-    result += "| 步骤 | 文件名 | 文件大小 |\n"
-    result += "|------|--------|----------|\n"
-    
-    for sf in step_files:
-        size_kb = sf['size'] / 1024
-        result += f"| - | {sf['filename']} | {size_kb:.1f} KB |\n"
-
-    return result
+    return json.dumps(result, ensure_ascii=False)
 
 
 if __name__ == '__main__':
