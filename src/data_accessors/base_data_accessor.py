@@ -29,6 +29,18 @@ class BaseDataAccessor(ABC):
     def get_data_summary(self):
         pass
 
+    def get_quality_summary(self):
+        """
+        获取数据质量摘要，子类可以重写此方法
+        """
+        return None
+
+    def get_quality_description(self) -> str:
+        """
+        获取数据质量描述（Markdown格式），子类可以重写此方法
+        """
+        return ""
+
     @property
     def dataframe(self):
         """
@@ -39,8 +51,12 @@ class BaseDataAccessor(ABC):
 
     @property
     def description(self):
+        """
+        生成完整的数据描述，包含数据结构和质量概况
+        """
         data_summary = self.get_data_summary()
         data_descriptions = []
+        
         for col in data_summary.columns:
             values = data_summary.column_values[col][:15]
             # 非字符串类型的，只预览5个值
@@ -66,8 +82,18 @@ class BaseDataAccessor(ABC):
         if table_description is not None and table_description.strip() != '':
             table_description = f"表格描述：{table_description}\n"
 
-        final_data_info = table_description + '\n'.join(data_descriptions).strip()
+        structure_info = table_description + '\n'.join(data_descriptions).strip()
 
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        quality_description = self.get_quality_description()
+        
+        if quality_description:
+            final_data_info = f"""## 📋 数据结构信息
+
+{structure_info}
+
+{quality_description}
+"""
+        else:
+            final_data_info = structure_info
 
         return final_data_info

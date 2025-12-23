@@ -71,25 +71,41 @@ async def get_prompt(
 ) -> str:
     return await get_preview_data(path_or_url, context)
 
-@mcp.tool(name='get_preview_data', description='数据描述信息')
+@mcp.tool(
+    name='get_preview_data', 
+    description='获取数据预览信息，包含数据结构（列名、类型、取值范围）和数据质量概况（缺失率、重复行、异常值检测）'
+)
 async def get_preview_data(
         path_or_url: Annotated[str, Field(description="数据文件路径或URL，仅支持Excel和CSV")],
         context: Context
 ) -> str:
     """
-    以AI易读的格式获取数据信息
+    获取数据预览信息，包含：
+    - 数据结构：列名、数据类型、典型取值、取值范围
+    - 数据质量：质量评级、缺失率、重复行、异常值检测
+    - 优化建议：针对数据质量问题的处理建议
 
     Args:
         path_or_url: 数据文件路径或URL，仅支持Excel和CSV
 
     Returns:
-        以Markdown形式组织的预览结果
+        以Markdown形式组织的数据预览结果，包含结构信息和质量概况
     """
     logger.info(f'filepath: {path_or_url}')
     # token = get_bearer_token(context)
     # logger.info(f"Client token: {token}")
+    
     data_accessor = get_data_accessor(path_or_url)
-    return "当前数据信息如下：\n" + data_accessor.description
+    
+    # 获取质量摘要用于日志记录
+    try:
+        quality_summary = data_accessor.get_quality_summary()
+        if quality_summary:
+            logger.info(f"Data quality: {quality_summary['quality_level']}, score: {quality_summary['quality_score']}")
+    except Exception as e:
+        logger.warning(f"Failed to get quality summary: {e}")
+    
+    return "# 当前数据信息\n\n" + data_accessor.description
 
 
 @mcp.tool(
