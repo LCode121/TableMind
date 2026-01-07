@@ -1,3 +1,4 @@
+import os
 import json
 import traceback
 from typing import List, Annotated
@@ -16,31 +17,15 @@ from data_accessors.csv_accessor import CSVAccessor
 from data_accessors.excel_accessor import ExcelAccessor
 from llms.chat_openai import ChatOpenAI
 
-mcp = FastMCP('data-analyzer', port=8000)
+mcp_transport = os.getenv('MCP_TRANSPORT_MODE', 'streamable-http')
+server_host = os.getenv('SERVER_HOST', '0.0.0.0')
+server_port = int(os.getenv('SERVER_PORT', '8000'))
 
-ACCESS_TOKEN = config.get_config()['mcp_server_token']
+mcp = FastMCP('data-analyzer')
 
 logger = utils.get_logger(__name__)
 
 llm = ChatOpenAI()
-
-
-def get_bearer_token(ctx):
-    request = ctx.get_http_request()
-    headers = request.headers
-    # Check if 'Authorization' header is present
-    authorization_header = headers.get('Authorization')
-
-    if authorization_header:
-        # Split the header into 'Bearer <token>'
-        parts = authorization_header.split()
-
-        if len(parts) == 2 and parts[0] == 'Bearer' and parts[1] == ACCESS_TOKEN:
-            return parts[1]
-        else:
-            raise ValueError("Invalid Authorization header format")
-    else:
-        raise ValueError("Authorization header missing")
 
 
 def get_data_accessor(path_or_url: str):
@@ -92,9 +77,7 @@ async def get_preview_data(
         以Markdown形式组织的数据预览结果，包含结构信息和质量概况
     """
     logger.info(f'filepath: {path_or_url}')
-    # token = get_bearer_token(context)
-    # logger.info(f"Client token: {token}")
-    
+
     data_accessor = get_data_accessor(path_or_url)
     
     # 获取质量摘要用于日志记录
@@ -127,8 +110,7 @@ async def analyze_data(
     Returns:
         List[Dict]: 数据分析结果表格，是以字典数组的形式组织的
     """
-    # token = get_bearer_token(context)
-    # logger.info(f"Client token: {token}")
+
 
     logger.info(f'question: {question}')
     logger.info(f'path_or_url: {path_or_url}')
@@ -266,10 +248,5 @@ async def operation_table(
 
 
 if __name__ == '__main__':
-    # # http://localhost:8000/sse
-    # mcp.run(transport='sse')
 
-    # # http://localhost:8000/mcp
-    # mcp.run(transport='streamable-http')
-
-    mcp.run(transport='stdio')
+    mcp.run(transport=mcp_transport, host=server_host, port=server_port)
