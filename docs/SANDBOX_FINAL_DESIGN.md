@@ -1,4 +1,4 @@
-# TableMind 代码执行沙盒 - 最终设计方案
+# TableMind 代码执行沙盒
 
 ## 一、概述
 
@@ -147,14 +147,38 @@ TableMind 容器需要 privileged 权限以运行内部 Docker Daemon，但这�
 
 ## 三、执行引擎
 
-### 3.1 IPython InteractiveShell
+### 3.1 执行引擎选型
+
+Worker 有两种执行引擎方案：
+
+| 方案 | 说明 | 优点 | 缺点 |
+|------|------|------|------|
+| IPython InteractiveShell | 直接在 FastAPI 进程中调用 | 简单、开发快 | 崩溃影响主进程、画图需要 hack |
+| jupyter_client + ipykernel | Kernel 独立子进程 | 进程隔离、原生画图支持 | 复杂度高 |
+
+**方案对比：**
+
+| 场景 | InteractiveShell | jupyter_client |
+|------|------------------|----------------|
+| 用户代码段错误 | ❌ Worker 主进程崩溃，所有 Session 断开 | ✅ 仅 Kernel 崩溃，返回错误，主进程不受影响 |
+| matplotlib 画图 | 需要 patch `plt.show()`，自己保存图片 | 原生协议返回 Base64 图片 |
+| 中断死循环 | 需要杀容器 | `kernel_manager.interrupt_kernel()` |
+| 实现复杂度 | 低 | 中 |
+
+**建议：**
+- **快速上线 / 不需要画图**：使用 InteractiveShell
+- **需要画图 / 追求稳定性**：使用 jupyter_client
+
+当前设计以 InteractiveShell 为基础，后续可平滑升级到 jupyter_client。
+
+### 3.2 IPython InteractiveShell（当前方案）
 
 Worker 使用 IPython InteractiveShell 作为执行引擎，支持：
 - **状态保持**：变量、函数定义在 Session 内持久化
 - **丰富输出**：支持 text、image、error 多种输出类型
 - **魔法命令**：可扩展支持 %matplotlib 等
 
-### 3.2 状态保持机制
+### 3.3 状态保持机制
 
 每个 Session 绑定一个独立的 Worker 容器，Worker 内的 IPython Shell 实例在整个 Session 生命周期内保持状态：
 
@@ -172,7 +196,7 @@ Worker 使用 IPython InteractiveShell 作为执行引擎，支持：
 
 所有代码在同一个 IPython Shell 中执行，变量在 Session 内持续有效。
 
-### 3.3 Session 与 Worker 绑定
+### 3.4 Session 与 Worker 绑定
 
 | 操作 | 说明 |
 |------|------|
@@ -236,20 +260,70 @@ data: <result>{"success": true, "execution_time": 0.234, "return_value": {...}}<
 
 ## 五、文件系统设计
 
-### 5.1 挂载方式
+### 5.1 DinD 卷挂载原理（级联挂载）
 
-用户指定一个宿主机路径，该路径会被挂载到 TableMind 容器和 Worker 容器中：
+**关键问题：** 在 DinD 架构中，内部 Docker 创建的 Worker 容器如何访问用户数据？
 
-| 挂载点 | 容器内路径 | 权限 | 说明 |
-|--------|------------|------|------|
-| 用户指定路径 | /data | 只读 | 用户上传的数据文件 |
+**重要理解：** 内部 Docker Daemon 运行在 TableMind 容器内，它的文件系统视角是 TableMind 容器，**不是宿主机**。所以挂载路径必须是 TableMind 容器内的路径。
+
+**解决方案：级联挂载**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         级联挂载原理                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Step 1: 宿主机 → TableMind                                                 │
+│  ┌──────────────────┐        ┌──────────────────┐                          │
+│  │  宿主机           │  -v    │  TableMind       │                          │
+│  │  /your/data/path │ ────→  │  /data           │                          │
+│  └──────────────────┘        └──────────────────┘                          │
+│                                                                             │
+│  Step 2: TableMind → Worker（关键！用容器内路径）                            │
+│  ┌──────────────────┐        ┌──────────────────┐                          │
+│  │  TableMind       │  -v    │  Worker          │                          │
+│  │  /data           │ ────→  │  /data           │                          │
+│  └──────────────────┘        └──────────────────┘                          │
+│                                                                             │
+│  SandboxManager 创建 Worker 时：                                            │
+│  docker.containers.run(                                                     │
+│      volumes={'/data': {'bind': '/data', 'mode': 'ro'}}                    │
+│  )                  ↑                                                       │
+│                     └── 这是 TableMind 容器内的路径，不是宿主机路径！        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 挂载配置
+
+| 挂载层级 | 源路径 | 目标路径 | 权限 |
+|----------|--------|----------|------|
+| 宿主机 → TableMind | /your/data/path | /data | 读写 |
+| TableMind → Worker | /data（容器内） | /data | 读写 |
+
+**docker-compose.yml 配置：**
+
+```yaml
+volumes:
+  - /your/data/path:/data:ro    # 宿主机路径挂载到 TableMind
+```
+
+**SandboxManager 创建 Worker：**
+
+```python
+# 使用 TableMind 容器内的固定路径 /data
+docker_client.containers.run(
+    image,
+    volumes={'/data': {'bind': '/data', 'mode': 'ro'}}  # 容器内路径！
+)
+```
 
 **注意：** 
-- 用户负责将数据文件放到指定路径
-- TableMind 和 Worker 只需要读取该路径
-- 无需创建 sessions 目录，所有分析结果通过 SSE 返回
+- 不需要 HOST_DATA_PATH 环境变量
+- 直接使用固定的容器内路径 `/data` 进行级联挂载
+- 用户只需在 docker-compose.yml 中配置宿主机路径
 
-### 5.2 路径传递
+### 5.3 路径传递
 
 代码中使用容器内路径 `/data/` 访问文件：
 
@@ -257,11 +331,11 @@ data: <result>{"success": true, "execution_time": 0.234, "return_value": {...}}<
 # 读取数据文件
 df = pd.read_csv('/data/uploads/sales_2024.csv')
 
-# 如果需要保存临时结果，使用 /tmp
+# 如果需要保存临时结果，使用 /tmp（Worker 容器内）
 df.to_csv('/tmp/result.csv', index=False)
 ```
 
-### 5.3 数据传递原则
+### 5.4 数据传递原则
 
 | 做法 | 说明 |
 |------|------|
@@ -326,7 +400,7 @@ sandbox.execute(f"df = pd.read_csv('{path}')")
 | 内存 | 2GB | mem_limit |
 | CPU | 1 核 | cpu_quota |
 | 进程数 | 100 | pids_limit |
-| 根文件系统 | 只读 | read_only: true |
+| 根文件系统 | 读写 |  |
 | capabilities | 全部移除 | cap_drop: ALL |
 | 提权 | 禁止 | no-new-privileges: true |
 
@@ -356,6 +430,9 @@ services:
     # DinD 需要 privileged 权限
     privileged: true
     
+    # 使用 tini 作为 init 进程（防止僵尸进程）
+    init: true
+    
     environment:
       - MCP_TRANSPORT_MODE=streamable-http
       - SERVER_HOST=0.0.0.0
@@ -375,10 +452,14 @@ services:
       - SANDBOX_EXECUTION_TIMEOUT=300
       
     volumes:
-      # 用户指定的数据目录（只读）
+      # 用户数据目录（级联挂载给 Worker）
+      # 修改此路径为你的实际数据目录
       - /your/data/path:/data:ro
       
-      # 内部 Docker 数据存储
+      # 离线镜像目录（用于加载 Worker 镜像）
+      - ./offline_images:/offline_images:ro
+      
+      # 内部 Docker 数据存储（持久化）
       - tablemind-docker:/var/lib/docker
       
     ports:
@@ -410,6 +491,16 @@ volumes:
 }
 ```
 
+**存储驱动说明：**
+
+| 驱动 | 优点 | 缺点 | 适用场景 |
+|------|------|------|----------|
+| vfs | 兼容性最好，DinD 环境稳定 | 不支持 CoW，每个容器完整拷贝镜像层 | Worker 数量少（2-5个） |
+| overlay2 | 性能好，支持 CoW | DinD 环境可能有兼容性问题 | 宿主机文件系统支持时 |
+| fuse-overlayfs | 性能较好，DinD 兼容性好 | 需要额外安装 fuse-overlayfs | 高并发场景 |
+
+对于 Worker 数量有限（2-5个）的场景，vfs 配合定期清理策略足够使用。
+
 ### 8.3 环境变量参考
 
 | 环境变量 | 默认值 | 说明 |
@@ -425,23 +516,34 @@ volumes:
 | SANDBOX_SESSION_MAX_LIFETIME | 7200 | 最大生存时间（秒） |
 | SANDBOX_EXECUTION_TIMEOUT | 300 | 执行超时（秒） |
 
+**注意：** 数据目录通过 docker-compose.yml 的 volumes 配置，无需环境变量。级联挂载使用固定的容器内路径 `/data`。
+
 ---
 
 ## 九、离线部署
 
-### 9.1 打包内容
+### 9.1 关键问题：DinD 镜像可见性
 
-离线部署包包含：
+**问题：** 在宿主机执行 `docker load` 加载的镜像，内部 Docker Daemon 看不到。
 
-| 文件 | 说明 |
-|------|------|
+| 操作位置 | 加载到 | Worker 能否使用 |
+|----------|--------|-----------------|
+| 宿主机 `docker load` | 宿主机 Docker | ❌ 不能 |
+| TableMind 容器内 `docker load` | 内部 Docker | ✅ 可以 |
+
+**解决方案：** Worker 镜像通过挂载目录传入，由 TableMind 启动时加载到内部 Docker。
+
+### 9.2 打包内容
+
+| 文件/目录 | 说明 |
+|-----------|------|
 | tablemind.tar | TableMind 镜像（包含 gVisor） |
-| tablemind-worker.tar | Worker 镜像 |
+| offline_images/worker.tar | Worker 镜像（挂载给 TableMind 加载） |
 | docker-compose.yml | 部署配置 |
 | install.sh | 安装脚本 |
 | README.md | 部署说明 |
 
-### 9.2 打包步骤（有网环境）
+### 9.3 打包步骤（有网环境）
 
 ```bash
 # 1. 构建镜像
@@ -450,40 +552,90 @@ docker build -t tablemind/worker:latest ./worker/
 
 # 2. 导出镜像
 docker save tablemind:1.0 -o tablemind.tar
-docker save tablemind/worker:latest -o tablemind-worker.tar
 
-# 3. 打包
+# 3. Worker 镜像放到 offline_images 目录（用于挂载）
+mkdir -p offline_images
+docker save tablemind/worker:latest -o offline_images/worker.tar
+
+# 4. 打包
 tar czf tablemind-offline-v1.0.tar.gz \
     tablemind.tar \
-    tablemind-worker.tar \
+    offline_images/ \
     docker-compose.yml \
     install.sh \
     README.md
 ```
 
-### 9.3 安装步骤（客户环境）
+### 9.4 安装步骤（客户环境）
 
 ```bash
 # 1. 解压
 tar xzf tablemind-offline-v1.0.tar.gz
 
-# 2. 加载镜像（无需 sudo）
+# 2. 只加载 TableMind 镜像到宿主机（Worker 镜像由 TableMind 内部加载）
 docker load < tablemind.tar
-docker load < tablemind-worker.tar
 
 # 3. 修改 docker-compose.yml 中的数据路径
+# environment:
+#   - HOST_DATA_PATH=/your/data/path
 # volumes:
 #   - /your/data/path:/data:ro
 
-# 4. 启动服务（无需 sudo）
+# 4. 启动服务
 docker-compose up -d
 ```
+
+**TableMind 启动时自动：**
+1. 启动内部 Docker Daemon
+2. 检测 `/offline_images/worker.tar` 是否存在
+3. 执行 `docker load -i /offline_images/worker.tar` 加载到内部 Docker
+4. 预热 Worker 容器池
+
+### 9.5 entrypoint.sh 关键逻辑
+
+```bash
+#!/bin/bash
+set -e
+
+# 1. 启动内部 Docker Daemon
+dockerd > /var/log/dockerd.log 2>&1 &
+
+# 2. 等待 Docker 就绪
+echo "Waiting for internal Docker Daemon..."
+until docker info > /dev/null 2>&1; do
+    sleep 1
+done
+
+# 3. 关键：加载 Worker 镜像到内部 Docker
+if [ -f "/offline_images/worker.tar" ]; then
+    echo "Loading Worker image into internal Docker..."
+    docker load -i /offline_images/worker.tar
+fi
+
+# 4. 检查 gVisor 是否可用
+if docker info 2>/dev/null | grep -q "runsc"; then
+    echo "✅ gVisor runtime is available"
+else
+    echo "⚠️ gVisor runtime not detected, using default runtime"
+fi
+
+# 5. 启动主程序
+exec python src/pandas_mcp_server.py
+```
+
+### 9.6 客户部署要求
 
 **客户无需：**
 - sudo 权限
 - 修改宿主机 Docker 配置
 - 安装 gVisor
 - 重启宿主机 Docker daemon
+- 手动加载 Worker 镜像
+
+**客户只需：**
+- 有 Docker 环境
+- 修改 docker-compose.yml 中的 HOST_DATA_PATH
+- 执行 `docker-compose up -d`
 
 ---
 
@@ -498,7 +650,39 @@ docker-compose up -d
 | 修改全局状态 | 每个 Session 独立 Worker、Session 结束时销毁 |
 | 文件句柄泄漏 | 容器级别隔离、Session 超时销毁时自动清理 |
 
-### 10.2 并发安全
+### 10.2 脏变量清理与步骤重试
+
+**场景：** 执行了步骤 1、2、3、4，但步骤 4 报错了，希望删除步骤 4 重新执行。
+
+**问题：** 步骤 4 执行过程中可能产生了部分变量，这些"脏变量"会污染后续执行。
+
+**解决方案：执行失败时的原子化清理**
+
+| 步骤 | 操作 |
+|------|------|
+| 执行前 | 记录 `keys_before = set(user_ns.keys())` |
+| 执行代码 | `shell.run_cell(code)` |
+| 捕获异常 | 如果报错，计算 `new_keys = set(user_ns.keys()) - keys_before` |
+| 清理 | 删除 new_keys 中的所有变量 |
+
+**执行流程示例：**
+
+```
+步骤 1: import pandas as pd       ✅ 成功，pd 保留
+步骤 2: df = pd.read_csv(...)     ✅ 成功，df 保留  
+步骤 3: result = df.describe()    ✅ 成功，result 保留
+步骤 4: temp = df.xxx(); out = ...  ❌ 报错
+
+自动清理：删除 temp（如果已创建）
+当前状态：pd, df, result 保留，可以重新执行修正后的步骤 4
+```
+
+**效果：** 
+- 执行失败时，Session 状态自动回滚到执行前
+- 用户可以直接重新执行修正后的代码，无需重建 Session
+- 保证步骤 1、2、3 的变量不受影响
+
+### 10.3 并发安全
 
 | 场景 | 处理方式 |
 |------|----------|
@@ -506,16 +690,16 @@ docker-compose up -d
 | Session 创建/销毁与执行并发 | 销毁操作也需获取 Session 锁 |
 | 容器池耗尽 | 返回 503，客户端实现重试逻辑 |
 
-### 10.3 错误处理
+### 10.4 错误处理
 
 | 错误类型 | 处理方式 |
 |----------|----------|
-| 代码执行错误 | 通过 `<err>` chunk 返回，Session 状态保持 |
+| 代码执行错误 | 通过 `<err>` chunk 返回，Session 状态保持（清理脏变量） |
 | 执行超时 | 中断执行，返回 TimeoutError，Session 状态保持 |
 | Worker 崩溃 | 标记 Session 为 error，客户端需创建新 Session |
 | TableMind 重启 | 所有 Session 丢失，启动时清理孤儿容器 |
 
-### 10.4 gVisor 兼容性
+### 10.5 gVisor 兼容性
 
 如果 gVisor 在某些环境不可用，系统会自动降级：
 
@@ -524,9 +708,41 @@ docker-compose up -d
 | gVisor 正常 | 使用 runtime=runsc |
 | gVisor 不可用 | 降级为 Docker 原生隔离 + 加强 seccomp |
 
+**启动时自动检测：**
+
+1. 尝试启动一个 runsc 容器执行 `echo hello`
+2. 如果成功，使用 gVisor 运行时
+3. 如果失败，降级为 runc + seccomp 严格模式，并记录警告日志
+
 启动日志会显示 gVisor 状态：
 - `✅ gVisor runtime is available`
 - `⚠️ gVisor runtime not detected, using default runtime`
+
+### 10.6 存储清理策略
+
+由于使用 VFS 存储驱动（不支持 CoW），需要定期清理：
+
+| 触发条件 | 操作 |
+|----------|------|
+| Worker 销毁时 | `docker rm -v` 确保删除关联卷 |
+| 定时任务（每小时） | `docker system prune -f` 清理悬空镜像/容器 |
+| 磁盘使用超过 80% | 告警 + 强制清理 |
+
+SandboxManager 应监控 `/var/lib/docker` 的磁盘使用情况。
+
+### 10.7 文件权限（UID/GID）
+
+**问题：** Worker 容器内生成的文件权限可能与宿主机用户不一致。
+
+| 场景 | 问题 |
+|------|------|
+| Worker 以 root 运行 | 生成的文件在宿主机变成 root:root |
+| Worker 以 nobody 运行 | 可能无法读取宿主机的 600 权限文件 |
+
+**建议：**
+- Worker 内部默认使用 uid=1000 运行 IPython
+- 如需自定义，可通过环境变量 PUID/PGID 传递
+- 数据目录以读写挂载，避免写入权限问题
 
 ---
 

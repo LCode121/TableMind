@@ -4,3 +4,17 @@ mcp_timeout_seconds: 600
 
 # 代码最大重试次数
 max_retry_execution_count: 3
+
+# 沙盒配置
+sandbox:
+  enabled: true
+  worker_image: "tablemind/worker:latest"
+  worker_port: 9000
+  memory_limit: "2g"
+  cpu_limit: 1.0
+  network_name: "tablemind-network"
+  container_prefix: "tablemind-worker"
+  health_check_timeout: 30
+  health_check_interval: 1
+  execution_timeout: 300
+  data_mount_path: "/data"
